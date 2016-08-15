@@ -2,7 +2,7 @@
     This sketch demonstrates how to set up a simple REST-like server
     to monitor a door/window opening and closing.
     A reed switch is connected to gnd and the other end is
-    connected to gpio2, when door 
+    connected to gpio2 with a pullup resistor to vcc, when door 
     is closed, reed switch should be closed and vice versa.
     ip is the IP address of the ESP8266 module if you want to hard code it,
     Otherwise remove ip, gateway and subnet and also WiFi.config to use dhcp.
@@ -13,200 +13,47 @@
     Any time status changes, the same json above will be posted to {hubIp}:{hubPort}.
 */
 
-#include <WiFiManager.h>
-#include <ArduinoJson.h>
 #include <ESP8266WiFi.h>
-#include <ESP8266mDNS.h>
-#include <WiFiUdp.h>
-#include <ArduinoOTA.h>
-#include "FS.h"
 
-#define CONTACT_PIN 2
+// Your wifi settings go here
+const char* ssid = "SSID";
+const char* password = "SSIDPASSWORD";
 
-void contactChanged();
-
-const char APPSETTINGS[] PROGMEM = "/appSettings.json";
-const char LOADED[] PROGMEM = " loaded: ";
-const char HUBPORT[] PROGMEM = "hubPort";
-const char HUPIP[] PROGMEM = "hubIp";
-const char DEVICENAME[] PROGMEM = "deviceName";
-
+// the following 3 ip addresses are not necessary if you are using dhcp
+IPAddress ip(192, 168, 1, 21); // hardcode ip for esp
+IPAddress gateway(192, 168, 1, 1); //router gateway
+IPAddress subnet(255, 255, 255, 0); //lan subnet
 const unsigned int serverPort = 9060; // port to run the http server on
 
 // Smartthings hub information
-IPAddress hubIp = INADDR_NONE; // smartthings hub ip
-unsigned int hubPort = 0; // smartthings hub port
-
-String deviceName = "ESP8266 Contact Sensor";
-const char *OTApassword = "123456"; //you should probably change thisâ€¦
+IPAddress hubIp(192, 168, 1, 43); // smartthings hub ip
+const unsigned int hubPort = 39500; // smartthings hub port
 
 byte oldSensorState, currentSensorState;
-volatile unsigned long last_micros;
-long debounceDelay = 10;    // the debounce time (in ms); increase if false positives
-bool sendUpdate = false;
+long debounceDelay = 10;    // the debounce time; increase if false positives
 
 WiFiServer server(serverPort); //server
 WiFiClient client; //client
-
-IPAddress IPfromString(String address) {
-  int ip1, ip2, ip3, ip4;
-  ip1 = address.toInt();
-  address = address.substring(address.indexOf('.') + 1);
-  ip2 = address.toInt();
-  address = address.substring(address.indexOf('.') + 1);
-  ip3 = address.toInt();
-  address = address.substring(address.indexOf('.') + 1);
-  ip4 = address.toInt();
-  return IPAddress(ip1, ip2, ip3, ip4);
-}
-
-void configModeCallback (WiFiManager *myWiFiManager) {
-  Serial.println(F("Entered config mode"));
-  Serial.println(WiFi.softAPIP());
-  Serial.println(myWiFiManager->getConfigPortalSSID());
-}
-
-bool loadAppConfig() {
-  File configFile = SPIFFS.open(FPSTR(APPSETTINGS), "r");
-  if (!configFile) {
-    Serial.println(F("Failed to open config file"));
-    return false;
-  }
-
-  size_t size = configFile.size();
-  if (size > 1024) {
-    Serial.println(F("Config file size is too large"));
-    return false;
-  }
-
-  std::unique_ptr<char[]> buf(new char[size]);
-  configFile.readBytes(buf.get(), size);
-  configFile.close();
-
-  const int BUFFER_SIZE = JSON_OBJECT_SIZE(3);
-  StaticJsonBuffer<BUFFER_SIZE> jsonBuffer;
-  JsonObject& json = jsonBuffer.parseObject(buf.get());
-
-  if (!json.success()) {
-    Serial.println(F("Failed to parse application config file"));
-    return false;
-  }
-
-  hubPort = json[FPSTR(HUBPORT)];
-  Serial.print(FPSTR(HUBPORT));
-  Serial.print(FPSTR(LOADED));
-  Serial.println(hubPort);
-  String hubAddress = json[FPSTR(HUPIP)];
-  Serial.print(FPSTR(HUPIP));
-  Serial.print(FPSTR(LOADED));
-  Serial.println(hubAddress);
-  hubIp = IPfromString(hubAddress);
-  String savedDeviceName = json[FPSTR(DEVICENAME)];
-  deviceName = savedDeviceName;
-  Serial.print(FPSTR(DEVICENAME));
-  Serial.print(FPSTR(LOADED));
-  Serial.println(deviceName);
-  return true;
-}
-
-bool saveAppConfig(String jsonString) {
-  Serial.print(F("Saving new settings: "));
-  Serial.println(jsonString);
-  File configFile = SPIFFS.open(FPSTR(APPSETTINGS), "w");
-  if (!configFile) {
-    Serial.println(F("Failed to open application config file for writing"));
-    return false;
-  }
-  configFile.print(jsonString);
-  configFile.close();
-  return true;
-}
+String readString;
 
 void setup() {
   delay(10);
-  Serial.begin(9600);
 
-  Serial.print(F("Sketch size: "));
-  Serial.println(ESP.getSketchSize());
-  Serial.print(F("Free size: "));
-  Serial.print(ESP.getFreeSketchSpace());
-
-  Serial.println();
-  Serial.println(F("Initializing IO..."));
   // prepare GPIO2
-  pinMode(CONTACT_PIN, INPUT_PULLUP);
-  attachInterrupt(CONTACT_PIN, contactChanged, CHANGE);
+  pinMode(2, INPUT);
 
-  Serial.println(F("Mounting FS..."));
+  // Connect to WiFi network
+  WiFi.begin(ssid, password);
+  // Comment out this line if you want ip assigned by router
+  WiFi.config(ip, gateway, subnet);
 
-  if (!SPIFFS.begin()) {
-    Serial.println(F("Failed to mount file system"));
-    return;
+
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(500);
   }
 
-  // DEBUG: remove all files from file system
-//  SPIFFS.format();
-
-  if (!loadAppConfig()) {
-    Serial.println(F("Failed to load application config"));
-  } else {
-    Serial.println(F("Application config loaded"));
-  }
-
-  //WiFiManager
-  //Local intialization. Once its business is done, there is no need to keep it around
-  WiFiManager wifiManager;
-  // DEBUG: reset WiFi settings
-//  wifiManager.resetSettings();
-  // set callback that gets called when connecting to previous WiFi fails, and enters Access Point mode
-  wifiManager.setAPCallback(configModeCallback);
-  // tries to connect to last known settings
-  // if it does not connect it starts an access point
-  // and goes into a blocking loop awaiting configuration
-  if (!wifiManager.autoConnect()) {
-    Serial.println(F("Failed to connect to WiFi and hit timeout"));
-    // reset and try again, or maybe put it to deep sleep
-    ESP.reset();
-    delay(1000);
-  }
-  Serial.print(F("Successfully connected to SSID '"));
-  Serial.print(WiFi.SSID());
-  Serial.print(F("' - local IP: "));
-  Serial.println(WiFi.localIP());
-  // Start the application server
-  Serial.print(F("Starting Application HTTP Server on port "));
-  Serial.println(serverPort);
+  // Start the server
   server.begin();
-
-  // Enable Arduino OTA (if we have enough room to update in place)
-  if (ESP.getSketchSize() < ESP.getFreeSketchSpace()) {
-    Serial.println(F("Starting OTA Server..."));
-    ArduinoOTA.setHostname(deviceName.c_str());
-    ArduinoOTA.setPassword(OTApassword);
-  
-    ArduinoOTA.onStart([]() {
-      Serial.println(F("Start"));
-    });
-    ArduinoOTA.onEnd([]() {
-      Serial.println(F("End"));
-      ESP.reset();
-    });
-    ArduinoOTA.onProgress([](unsigned int progress, unsigned int total) {
-      Serial.printf((const char *)F("Progress: %u%%\n"), (progress / (total / 100)));
-    });
-    ArduinoOTA.onError([](ota_error_t error) {
-      Serial.printf((const char *)F("Error[%u]: "), error);
-      if (error == OTA_AUTH_ERROR) Serial.println(F("Auth Failed"));
-      else if (error == OTA_BEGIN_ERROR) Serial.println(F("Begin Failed"));
-      else if (error == OTA_CONNECT_ERROR) Serial.println(F("Connect Failed"));
-      else if (error == OTA_RECEIVE_ERROR) Serial.println(F("Receive Failed"));
-      else if (error == OTA_END_ERROR) Serial.println(F("End Failed"));
-      ESP.reset();
-    });
-    ArduinoOTA.begin();
-  }
-
-  Serial.println(F("*** Application ready."));
 }
 
 // send json data to client connection
@@ -222,49 +69,37 @@ void sendJSONData(WiFiClient client) {
 // send response to client for a request for status
 void handleRequest(WiFiClient client)
 {
-  // Wait until the client sends some data
-  Serial.print(F("Received request: "));
-  while(!client.available()){
-    delay(1);
-  }
-
-  // Read the first line of the request
-  String req = client.readStringUntil('\r');
-  Serial.println(req);
-  if (!req.indexOf(F("GET")))
-  {
-    client.flush(); // we don't care about anything else for a GET request
-  }
-
-  // Match the request
-  if (req.indexOf(F("/getstatus")) != -1) {
-    client.println(F("HTTP/1.1 200 OK")); //send new page
-    sendJSONData(client);
-  }
-  else if (req.indexOf(F("POST /updateSettings")) != -1) {
-    // get the body in order to retrieve the POST data
-    while (client.available() && client.readStringUntil('\r').length() > 1);
-    String settingsJSON = client.readStringUntil('\r');
-    client.flush();
-    const int BUFFER_SIZE = JSON_OBJECT_SIZE(3);
-    StaticJsonBuffer<BUFFER_SIZE> jsonBuffer;
-    JsonObject& root = jsonBuffer.parseObject(settingsJSON);
-    if (root[FPSTR(HUPIP)]) hubIp = IPfromString(root[FPSTR(HUPIP)]);
-    if (root[FPSTR(HUBPORT)]) hubPort = root[FPSTR(HUBPORT)];
-    if (root[FPSTR(DEVICENAME)]) { 
-      String newDeviceName = root[FPSTR(DEVICENAME)];
-      deviceName = newDeviceName;
+  boolean currentLineIsBlank = true;
+  while (client.connected()) {
+    if (client.available()) {
+      char c = client.read();
+      //read char by char HTTP request
+      if (readString.length() < 100) {
+        //store characters to string
+        readString += c;
+      }
+      if (c == '\n' && currentLineIsBlank) {
+        //now output HTML data header
+        if (readString.substring(readString.indexOf('/'), readString.indexOf('/') + 10) == "/getstatus") {
+          client.println("HTTP/1.1 200 OK"); //send new page
+          sendJSONData(client);
+        } else {
+          client.println(F("HTTP/1.1 204 No Content"));
+          client.println();
+          client.println();
+        }
+        break;
+      }
+      if (c == '\n') {
+        // you're starting a new line
+        currentLineIsBlank = true;
+      } else if (c != '\r') {
+        // you've gotten a character on the current line
+        currentLineIsBlank = false;
+      }
     }
-    saveAppConfig(settingsJSON);
-    client.println(F("HTTP/1.1 204 No Content"));
-    client.println();
-    client.println();
   }
-  else {
-    client.println(F("HTTP/1.1 204 No Content"));
-    client.println();
-    client.println();
-  }
+  readString = "";
 
   delay(1);
   //stopping client
@@ -282,12 +117,10 @@ int sendNotify() //client function to send/receieve POST data.
     client.print(F(":"));
     client.println(hubPort);
     sendJSONData(client);
-    Serial.println(F("Pushing new values to hub..."));
   }
   else {
     //connection failed
     returnStatus = 0;
-    Serial.println(F("Connection to hub failed."));
   }
 
   // read any data returned from the POST
@@ -301,28 +134,32 @@ int sendNotify() //client function to send/receieve POST data.
   return returnStatus;
 }
 
-void contactChanged() {
-  if((long)(micros() - last_micros) >= debounceDelay * 1000) {
-    currentSensorState = digitalRead(CONTACT_PIN);
-    if (currentSensorState != oldSensorState) {
-      sendUpdate = true;
+
+boolean sensorChanged() {
+  boolean retVal = false;
+  currentSensorState = digitalRead(2);
+  if(currentSensorState != oldSensorState) {
+    // make sure we didnâ€™t get a false reading
+    delay(debounceDelay);
+    currentSensorState = digitalRead(2);
+    if(currentSensorState != oldSensorState) {
+      retVal = true;
     }
-    last_micros = micros();
   }
+  return retVal;
 }
 
 void loop() {
-  if (sendUpdate) {
-    if (hubIp != INADDR_NONE && sendNotify()) {
+  if (sensorChanged()) {
+    if (sendNotify()) {
       // update old sensor state after weâ€™ve sent the notify
       oldSensorState = currentSensorState;
     }
-    sendUpdate = false;
   }
-  ArduinoOTA.handle();
+
   // Handle any incoming requests
   WiFiClient client = server.available();
   if (client) {
     handleRequest(client);
-  }  
+  }
 }
