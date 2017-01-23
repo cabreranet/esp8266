@@ -36,7 +36,7 @@
 			state("open", label:'${name}', icon:"st.contact.contact.open", backgroundColor:"#ffa81e")
 			state("closed", label:'${name}', icon:"st.contact.contact.closed", backgroundColor:"#79b821")
 		}
-		standardTile("refresh", "device.backdoor", inactiveLabel: false, decoration: "flat") {
+		standardTile("refresh", "device.contact", inactiveLabel: false, decoration: "flat") {
 			state("default", label:'', action:"refresh.refresh", icon:"st.secondary.refresh")
 		}
 		main "contact"
